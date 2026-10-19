@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>太空射擊遊戲</title>
+<style>
+  /* 頁面置中，深色背景 */
+  html, body {
+    height: 100%;
+    margin: 0;
+    background: #05060d;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Microsoft JhengHei", "PingFang TC", sans-serif;
+  }
+  canvas {
+    background: #000;
+    border: 2px solid #1d2440;
+    max-width: 100%;
+    max-height: 100vh;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="800" height="600"></canvas>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  // ===== 遊戲設定（可自行調整難度）=====
+  const PLAYER_SPEED = 360;         // 玩家移動速度（像素/秒）
+  const BULLET_SPEED = 520;         // 我方子彈速度
+  const SHOOT_COOLDOWN = 0.25;      // 我方射擊冷卻（秒）
+  const ALIEN_SPAWN_INTERVAL = 1.1; // 外星人刷新間隔（秒）
+  const ENEMY_BULLET_SPEED = 240;   // 敵方子彈速度
+
+  const START_LIVES = 3;            // 初始生命數
+  const MAX_LIVES = 5;              // 生命上限
+  const POWER_DURATION = 10;        // 三連發持續時間（秒）
+  const STAR_DURATION = 3;          // 無敵星星持續時間（秒）
+  const INVINCIBLE_TIME = 2;        // 被擊中後的短暫無敵（秒）
+  const BUBBLE_SPEED = 90;          // 增益泡泡下落速度
+
+  // 射擊系統：每 3 發為 1 發「強化普通攻擊」（子彈較大、傷害較高），不影響大招能量條
+  const NORMAL_BULLET   = { w: 4, h: 12, dmg: 1 };
+  const ENHANCED_BULLET = { w: 8, h: 18, dmg: 2 };
+  const ENHANCE_EVERY = 3;          // 每發出 2 次普通攻擊，第 3 次必為強化普通攻擊
+  const HIT_MAX = 12;               // 命中能量條上限（命中 12 次）
+  const HIT_TIMEOUT = 5;            // 超過幾秒沒命中，命中能量條開始消退
+  const HIT_DRAIN_TIME = 3;         // 從滿格消退到 0 所需秒數
+  const HOMING_SPEED = 520;         // 追蹤彈速度
+  const HOMING_TURN = 7;            // 追蹤彈轉向速度（弧度/秒）
+
+  // 小兵設定
+  const MINION_MAX = 2;             // 最多同時帶幾隻小兵
+  const MINION_SPEED = 200;         // 小兵左右移動速度
+  const MINION_FIRE_INTERVAL = 0.7; // 小兵射擊間隔（秒）
+
+  // 新泡泡設定
+  const MG_DURATION = 5;            // 機關槍持續時間（秒）
+  const MG_INTERVAL = 0.07;         // 機關槍射擊間隔（秒）
+  const MG_BULLET_SPEED = 720;      // 機關槍子彈速度
+  const VAMP_DURATION = 8;          // 吸血鬼持續時間（秒），期間每擊倒一隻 +1 顆心
+  const SHIELD_HITS = 10;           // 反彈盾可抵擋的子彈數
+  const REFLECT_SPEED = 420;        // 反彈子彈速度
+  const REFLECT_DAMAGE = 2;         // 反彈子彈的傷害（可反殺外星人）
+
+  // 大招設定：擊倒外星人累積能量，滿了就自動發動，持續期間向扇形範圍散射大量子彈
+  const ENERGY_MAX = 100;           // 能量條上限
+  const ULT_DURATION = 10;          // 大招持續時間（秒）
+  const ULT_FIRE_INTERVAL = 0.07;   // 大招每波發射間隔（秒）
+  const ULT_BULLETS = 9;            // 每波子彈數量
+  const ULT_SPREAD = 45;            // 散射角度範圍（左右各 45 度）
+
+  // 外星人種類：體型越大，血量越高、子彈越大、得分越高、出現機率越低
+  // weight = 出現權重；drop = 掉落泡泡的機率；energy = 擊倒後增加的大招能量
+  const ALIEN_TYPES = [
+    { name: 'small',  w: 32, h: 22, hp: 1, points: 1,  weight: 60, speed: 55,
+      fireInterval: 2.0, bullet: { w: 4,  h: 10 }, color: '#7dff6a', drop: 0.10, energy: 4 },
+    { name: 'medium', w: 48, h: 34, hp: 3, points: 5,  weight: 30, speed: 40,
+      fireInterval: 2.2, bullet: { w: 7,  h: 16 }, color: '#ffb347', drop: 0.25, energy: 12 },
+    { name: 'large',  w: 72, h: 50, hp: 6, points: 10, weight: 10, speed: 28,
+      fireInterval: 2.4, bullet: { w: 12, h: 22 }, color: '#c77dff', drop: 0.50, energy: 25 }
+  ];
+
+  // 泡泡種類（weight 為掉落權重）
+  const BUBBLE_TYPES = {
+    life:    { color: '#ff7b9c', label: '♥',  weight: 20 }, // 生命 +1
+    power:   { color: '#ffd34d', label: 'x3', weight: 25 }, // 10 秒三連發
+    star:    { color: '#8ff0ff', label: '★',  weight: 15 }, // 3 秒無敵
+    machine: { color: '#ff9f43', label: '連',  weight: 20 }, // 5 秒機關槍
+    vampire: { color: '#e8334f', label: '血',  weight: 10 }, // 吸血鬼
+    reflect: { color: '#4dffb0', label: '盾',  weight: 15 }, // 反彈盾
+    summon:  { color: '#8aa8ff', label: '兵',  weight: 15 }  // 召喚小兵
+  };
+
+  // ===== 遊戲狀態 =====
+  let player, bullets, aliens, enemyBullets, bubbles, popups, sparks, minions, explosions;
+  let score, lives, powerTimer, starTimer, invincible, gameOver;
+  let energy, ultTimer, ultFireTimer;
+  let mgTimer, mgFireTimer, vampTimer, shieldHits;
+  let hitGauge, homing, noHitTimer, normalStreak;
+  let spawnTimer, shootTimer, lastTime, clock = 0;
+  const keys = {};
+
+  // 背景星空（緩慢捲動製造動感）
+  const stars = Array.from({ length: 90 }, () => ({
+    x: Math.random() * W,
+    y: Math.random() * H,
+    r: Math.random() * 1.5 + 0.3,
+    s: Math.random() * 20 + 8
+  }));
+
+  // 初始化／重新開始：重設分數、生命、增益並清空所有物件
+  function reset() {
+    player = { w: 40, h: 30, x: W / 2 - 20, y: H - 50 };
+    bullets = []; aliens = []; enemyBullets = []; bubbles = []; popups = []; sparks = []; minions = []; explosions = [];
+    score = 0;
+    lives = START_LIVES;
+    powerTimer = 0;
+    starTimer = 0;
+    invincible = 0;
+    energy = 0;
+    ultTimer = 0;
+    ultFireTimer = 0;
+    mgTimer = 0;
+    mgFireTimer = 0;
+    vampTimer = 0;
+    shieldHits = 0;
+    hitGauge = 0;
+    homing = false;
+    noHitTimer = 0;
+    normalStreak = 0;
+    gameOver = false;
+    spawnTimer = 0.5;
+    shootTimer = 0;
+  }
+
+  // ===== 鍵盤輸入 =====
+  window.addEventListener('keydown', e => {
+    if (['ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
+    keys[e.code] = true;
+    if (e.code === 'Enter' && gameOver) reset(); // 結束後按 Enter 重新開始
+  });
+  window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+  // 矩形碰撞判斷（AABB）
+  function hit(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x &&
+           a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  // 依權重隨機挑選（用於外星人種類與泡泡種類）
+  function pickWeighted(items, getWeight) {
+    let total = 0;
+    items.forEach(i => total += getWeight(i));
+    let r = Math.random() * total;
+    for (const i of items) { r -= getWeight(i); if (r <= 0) return i; }
+    return items[items.length - 1];
+  }
+
+  // 在指定位置顯示一段往上飄的提示文字
+  function popup(text, x, y, color) {
+    popups.push({ text, x, y, color, life: 1.0 });
+  }
+
+  // 刷新一隻外星人（畫面頂部隨機位置，種類依權重）
+  function spawnAlien() {
+    const t = pickWeighted(ALIEN_TYPES, t => t.weight);
+    aliens.push({
+      type: t, w: t.w, h: t.h, hp: t.hp, flash: 0,
+      x: Math.random() * (W - t.w),
+      y: -t.h,
+      fireTimer: 0.5 + Math.random() * t.fireInterval
+    });
+  }
+
+  // 外星人被擊倒：計分並依機率掉落增益泡泡
+  function killAlien(a) {
+    score += a.type.points;
+    const cx = a.x + a.w / 2, cy = a.y + a.h / 2;
+    if (a.type.points > 1) popup('+' + a.type.points, cx, a.y, '#ffffff');
+    // 吸血鬼狀態：每擊倒一隻外星人就獲得 1 顆心
+    if (vampTimer > 0 && lives < MAX_LIVES) {
+      lives++;
+      popup('+1 ♥', cx, a.y - 16, '#e8334f');
+    }
+    // 累積大招能量（大招發動期間不再累積），滿了就自動發動
+    if (ultTimer <= 0) {
+      energy = Math.min(ENERGY_MAX, energy + a.type.energy);
+      if (energy >= ENERGY_MAX) {
+        ultTimer = ULT_DURATION;
+        ultFireTimer = 0;
+        popup('大招發動！', player.x + player.w / 2, player.y - 30, '#ff6bd6');
+      }
+    }
+    if (Math.random() < a.type.drop) {
+      const kind = pickWeighted(Object.keys(BUBBLE_TYPES), k => BUBBLE_TYPES[k].weight);
+      bubbles.push({ kind, x: cx - 16, y: cy - 16, w: 32, h: 32, born: clock });
+    }
+  }
+
+  // 玩家碰到泡泡後套用效果
+  function applyBubble(b) {
+    const cx = b.x + b.w / 2, cy = b.y;
+    if (b.kind === 'life') {
+      if (lives < MAX_LIVES) { lives++; popup('+1 生命', cx, cy, '#ff7b9c'); }
+      else popup('生命已滿', cx, cy, '#ff7b9c');
+    } else if (b.kind === 'power') {
+      powerTimer = POWER_DURATION; // 重複獲得則重新計時
+      popup('三連發 10s', cx, cy, '#ffd34d');
+    } else if (b.kind === 'star') {
+      starTimer = STAR_DURATION;
+      popup('無敵 3s', cx, cy, '#8ff0ff');
+    } else if (b.kind === 'machine') {
+      mgTimer = MG_DURATION;
+      mgFireTimer = 0;
+      popup('機關槍 5s', cx, cy, '#ff9f43');
+    } else if (b.kind === 'vampire') {
+      vampTimer = VAMP_DURATION;
+      popup('吸血鬼 8s', cx, cy, '#e8334f');
+    } else if (b.kind === 'reflect') {
+      shieldHits = SHIELD_HITS; // 重複獲得則重新補滿
+      popup('反彈盾 x10', cx, cy, '#4dffb0');
+    } else {
+      summonMinion(cx, cy);
+    }
+  }
+
+  // 玩家受傷：扣 1 條命並進入短暫無敵；命用完則 Game Over
+  function damagePlayer() {
+    lives--;
+    invincible = INVINCIBLE_TIME;
+    if (lives <= 0) { lives = 0; gameOver = true; }
+  }
+
+  // 往四周噴出一圈光點（爆炸／小兵被擊毀）
+  function burst(x, y, hueMin, hueRange, n) {
+    for (let i = 0; i < n; i++) {
+      const ang = Math.random() * Math.PI * 2, spd = 80 + Math.random() * 120;
+      sparks.push({ x, y, vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+                    hue: hueMin + Math.random() * hueRange, life: 0.4 });
+    }
+  }
+
+  // 追蹤彈命中時的爆炸特效（擴散光環 + 碎光）
+  function explode(x, y) {
+    explosions.push({ x, y, t: 0 });
+    burst(x, y, 20, 40, 10);
+  }
+
+  // 飛船的子彈命中敵人：累積命中能量條，滿格後進入追蹤彈模式
+  function registerHit() {
+    noHitTimer = 0;
+    if (homing) { hitGauge = HIT_MAX; return; } // 追蹤模式下命中會補滿
+    hitGauge = Math.min(HIT_MAX, hitGauge + 1);
+    if (hitGauge >= HIT_MAX) {
+      homing = true;
+      popup('追蹤彈啟動！', player.x + player.w / 2, player.y - 46, '#ff7bd5');
+    }
+  }
+
+  // 發射一次飛船攻擊（可能是三發並排的一組）
+  // 規則：追蹤模式 → 強化＋追蹤；否則每 2 次普通攻擊後第 3 次為強化普通攻擊
+  function fireVolley(speed, normalColor) {
+    let enhanced, tracking = false;
+    if (homing) { enhanced = true; tracking = true; }
+    else if (normalStreak >= ENHANCE_EVERY - 1) { enhanced = true; normalStreak = 0; }
+    else { enhanced = false; normalStreak++; }
+
+    const def = enhanced ? ENHANCED_BULLET : NORMAL_BULLET;
+    const cx = player.x + player.w / 2;
+    const offsets = powerTimer > 0 ? [-14, 0, 14] : [0];
+    for (const dx of offsets) {
+      bullets.push({
+        x: cx + dx - def.w / 2, y: player.y - def.h, w: def.w, h: def.h, dmg: def.dmg,
+        vx: 0, vy: tracking ? HOMING_SPEED : speed,
+        homing: tracking, life: tracking ? 3 : undefined,
+        color: tracking ? '#ff7bd5' : enhanced ? '#7de8ff' : normalColor
+      });
+    }
+  }
+
+  // 追蹤彈：每幀朝最近的外星人轉向
+  function steerBullet(b, dt) {
+    const bx = b.x + b.w / 2, by = b.y + b.h / 2;
+    sparks.push({ x: bx, y: by, vx: 0, vy: 0, hue: 320, life: 0.25 }); // 尾跡
+    let target = null, best = Infinity;
+    for (const a of aliens) {
+      if (a.dead || a.y + a.h <= 0) continue;
+      const d = (a.x + a.w / 2 - bx) ** 2 + (a.y + a.h / 2 - by) ** 2;
+      if (d < best) { best = d; target = a; }
+    }
+    if (!target) return;
+    const speed = Math.hypot(b.vx, b.vy);
+    const cur = Math.atan2(b.vx, b.vy);                                   // 0 = 正上方
+    const want = Math.atan2(target.x + target.w / 2 - bx, by - (target.y + target.h / 2));
+    let diff = want - cur;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    const maxTurn = HOMING_TURN * dt;
+    const ang = cur + Math.max(-maxTurn, Math.min(maxTurn, diff));
+    b.vx = Math.sin(ang) * speed;
+    b.vy = Math.cos(ang) * speed;
+  }
+
+  // 召喚小兵（最多 MINION_MAX 隻）
+  function summonMinion(cx, cy) {
+    if (minions.length >= MINION_MAX) { popup('小兵已滿', cx, cy, '#8aa8ff'); return; }
+    const side = minions.length === 0 ? -70 : 70;
+    const w = 28, h = 21;
+    minions.push({
+      x: Math.max(0, Math.min(W - w, player.x + player.w / 2 + side - w / 2)),
+      y: player.y + player.h - h, w, h, fireTimer: 0.3
+    });
+    popup('+1 小兵', cx, cy, '#8aa8ff');
+  }
+
+  // 小兵 AI：只能左右移動，移到最危險（最靠下）外星人的正下方，對齊後發射普通子彈
+  function updateMinions(dt) {
+    const threats = aliens.filter(a => a.y + a.h > 0).sort((a, b) => b.y - a.y);
+    minions.forEach((m, i) => {
+      const mx = m.x + m.w / 2;
+      let goal, aimed = false;
+      if (threats.length) {
+        const t = threats[i % threats.length];
+        goal = t.x + t.w / 2;
+        aimed = Math.abs(goal - mx) < t.w / 2;
+      } else {
+        goal = player.x + player.w / 2 + (i === 0 ? -70 : 70); // 沒目標時待在飛船兩側
+      }
+      const diff = goal - mx;
+      if (Math.abs(diff) > 4) m.x += Math.sign(diff) * Math.min(Math.abs(diff), MINION_SPEED * dt);
+      m.x = Math.max(0, Math.min(W - m.w, m.x));
+      m.fireTimer -= dt;
+      if (aimed && m.fireTimer <= 0) {
+        bullets.push({ x: m.x + m.w / 2 - 2, y: m.y - 12, w: 4, h: 12, dmg: 1,
+                       color: '#9db8ff', noCharge: true });
+        m.fireTimer = MINION_FIRE_INTERVAL;
+      }
+    });
+  }
+
+  // ===== 更新邏輯 =====
+  function update(dt) {
+    clock += dt;
+    for (const s of stars) {
+      s.y += s.s * dt;
+      if (s.y > H) { s.y = 0; s.x = Math.random() * W; }
+    }
+    if (gameOver) return; // 結束後畫面暫停
+
+    // 玩家左右移動，並限制在畫面內
+    if (keys['ArrowLeft'])  player.x -= PLAYER_SPEED * dt;
+    if (keys['ArrowRight']) player.x += PLAYER_SPEED * dt;
+    player.x = Math.max(0, Math.min(W - player.w, player.x));
+
+    // 計時器遞減
+    powerTimer = Math.max(0, powerTimer - dt);
+    starTimer = Math.max(0, starTimer - dt);
+    invincible = Math.max(0, invincible - dt);
+    mgTimer = Math.max(0, mgTimer - dt);
+    vampTimer = Math.max(0, vampTimer - dt);
+
+    // 空白鍵射擊：平時單發，火力增益時三發並排
+    shootTimer -= dt;
+    if (keys['Space'] && shootTimer <= 0) {
+      fireVolley(BULLET_SPEED);
+      shootTimer = SHOOT_COOLDOWN;
+    }
+
+    // 機關槍：不用按空白鍵，自動以高射速發射（若同時有三連發則三發並排）
+    if (mgTimer > 0) {
+      mgFireTimer -= dt;
+      while (mgFireTimer <= 0) {
+        mgFireTimer += MG_INTERVAL;
+        fireVolley(MG_BULLET_SPEED, '#ffb347');
+      }
+    }
+
+    updateMinions(dt);
+
+    // 大招：持續期間每隔一小段時間向扇形範圍發射一波子彈，角度會緩慢擺動
+    if (ultTimer > 0) {
+      ultTimer = Math.max(0, ultTimer - dt);
+      ultFireTimer -= dt;
+      while (ultFireTimer <= 0) {
+        ultFireTimer += ULT_FIRE_INTERVAL;
+        const wobble = Math.sin(clock * 4) * 8;
+        for (let i = 0; i < ULT_BULLETS; i++) {
+          const deg = -ULT_SPREAD + (2 * ULT_SPREAD) * i / (ULT_BULLETS - 1) + wobble;
+          const rad = deg * Math.PI / 180;
+          bullets.push({
+            x: player.x + player.w / 2 - 3, y: player.y, w: 6, h: 6,
+            vx: Math.sin(rad) * BULLET_SPEED, vy: Math.cos(rad) * BULLET_SPEED,
+            hue: (clock * 200 + i * 40) % 360, noCharge: true
+          });
+        }
+      }
+      if (ultTimer <= 0) energy = 0; // 大招結束，能量條歸零
+    }
+
+    // 我方子彈：依速度移動（一般子彈只往上），飛出畫面任一邊則銷毀
+    bullets.forEach(b => {
+      if (b.homing) steerBullet(b, dt);
+      b.x += (b.vx || 0) * dt;
+      b.y -= (b.vy !== undefined ? b.vy : BULLET_SPEED) * dt;
+      if (b.life !== undefined) b.life -= dt;
+    });
+    bullets = bullets.filter(b => b.y + b.h > 0 && b.y < H && b.x + b.w > 0 && b.x < W &&
+                                  (b.life === undefined || b.life > 0));
+
+    // 命中能量條：超過 HIT_TIMEOUT 秒沒命中就慢慢消退，歸零後回到普通射擊
+    noHitTimer += dt;
+    if (hitGauge > 0 && noHitTimer > HIT_TIMEOUT) {
+      hitGauge -= HIT_MAX / HIT_DRAIN_TIME * dt;
+      if (hitGauge <= 0) { hitGauge = 0; homing = false; }
+    }
+
+    // 定期刷新外星人
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) { spawnAlien(); spawnTimer = ALIEN_SPAWN_INTERVAL; }
+
+    // 外星人：緩慢下移並定期發射子彈（子彈大小依體型）
+    for (const a of aliens) {
+      a.y += a.type.speed * dt;
+      a.flash = Math.max(0, a.flash - dt);
+      a.fireTimer -= dt;
+      if (a.fireTimer <= 0 && a.y > 0) {
+        const bw = a.type.bullet.w, bh = a.type.bullet.h;
+        enemyBullets.push({ x: a.x + a.w / 2 - bw / 2, y: a.y + a.h, w: bw, h: bh });
+        a.fireTimer = a.type.fireInterval * (0.7 + Math.random() * 0.8);
+      }
+    }
+    aliens = aliens.filter(a => a.y < H); // 飛出底部則移除
+
+    // 敵方子彈：向下移動，超出底部則銷毀
+    enemyBullets.forEach(b => b.y += ENEMY_BULLET_SPEED * dt);
+    enemyBullets = enemyBullets.filter(b => b.y < H);
+
+    // 泡泡：緩緩下落，超出底部則消失
+    bubbles.forEach(b => b.y += BUBBLE_SPEED * dt);
+    bubbles = bubbles.filter(b => b.y < H);
+
+    // 碰撞：我方子彈 vs 外星人 → 扣 1 血，血量歸零才擊倒
+    for (const b of bullets) {
+      for (const a of aliens) {
+        if (b.dead || a.dead) continue;
+        if (hit(b, a)) {
+          b.dead = true;
+          a.hp -= (b.dmg || 1);
+          a.flash = 0.08;
+          if (!b.noCharge) registerHit();            // 只有飛船本身的子彈會累積命中能量
+          if (b.homing) explode(b.x + b.w / 2, b.y + b.h / 2);
+          if (a.hp <= 0) { a.dead = true; killAlien(a); }
+          break;
+        }
+      }
+    }
+    bullets = bullets.filter(b => !b.dead);
+    aliens = aliens.filter(a => !a.dead);
+
+    // 玩家 vs 泡泡：碰到才觸發增益
+    for (const b of bubbles) {
+      if (hit(b, player)) { b.dead = true; applyBubble(b); }
+    }
+    bubbles = bubbles.filter(b => !b.dead);
+
+    // 敵方子彈命中小兵：小兵消失
+    for (const eb of enemyBullets) {
+      for (const m of minions) {
+        if (!m.dead && !eb.dead && hit(eb, m)) {
+          eb.dead = m.dead = true;
+          burst(m.x + m.w / 2, m.y + m.h / 2, 200, 40, 12);
+        }
+      }
+    }
+    enemyBullets = enemyBullets.filter(b => !b.dead);
+    minions = minions.filter(m => !m.dead);
+
+    // 反彈盾：敵方子彈擊中時以隨機角度（偏向上方）反彈，成為可反殺外星人的子彈
+    if (starTimer <= 0 && shieldHits > 0) {
+      for (const eb of enemyBullets) {
+        if (shieldHits > 0 && hit(eb, player)) {
+          eb.dead = true;
+          shieldHits--;
+          const rad = (Math.random() * 160 - 80) * Math.PI / 180;
+          bullets.push({
+            x: eb.x, y: eb.y, w: Math.max(eb.w, 6), h: Math.max(eb.h, 6),
+            vx: Math.sin(rad) * REFLECT_SPEED, vy: Math.cos(rad) * REFLECT_SPEED,
+            dmg: REFLECT_DAMAGE, color: '#4dffb0', noCharge: true
+          });
+          if (shieldHits === 0) popup('反彈盾破裂', player.x + player.w / 2, player.y - 30, '#4dffb0');
+        }
+      }
+      enemyBullets = enemyBullets.filter(b => !b.dead);
+    }
+
+    // 無敵星星期間：敵方子彈碰到玩家會被吸收，不受任何傷害
+    if (starTimer > 0) {
+      enemyBullets = enemyBullets.filter(b => !hit(b, player));
+    } else if (invincible <= 0) {
+      // 碰撞：敵方子彈／外星人撞到玩家 → 扣命
+      for (const b of enemyBullets) {
+        if (hit(b, player)) { b.dead = true; damagePlayer(); break; }
+      }
+      if (invincible <= 0) {
+        for (const a of aliens) {
+          if (hit(a, player)) { a.dead = true; damagePlayer(); break; }
+        }
+      }
+      enemyBullets = enemyBullets.filter(b => !b.dead);
+      aliens = aliens.filter(a => !a.dead);
+    }
+
+    // 提示文字：往上飄並淡出
+    popups.forEach(p => { p.y -= 40 * dt; p.life -= dt; });
+    popups = popups.filter(p => p.life > 0);
+
+    // 無敵期間：飛船周圍冒出彩色光點（快結束時隨閃爍一起忽隱忽現）
+    if (starShowing()) {
+      for (let i = 0; i < 2; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        sparks.push({
+          x: player.x + player.w / 2 + Math.cos(ang) * 30,
+          y: player.y + player.h / 2 + Math.sin(ang) * 30,
+          vx: Math.cos(ang) * 40 + (Math.random() - 0.5) * 30,
+          vy: Math.sin(ang) * 40 - 30,
+          hue: (clock * 360 + Math.random() * 120) % 360,
+          life: 0.5
+        });
+      }
+    }
+    sparks.forEach(s => { s.x += s.vx * dt; s.y += s.vy * dt; s.life -= dt; });
+    sparks = sparks.filter(s => s.life > 0);
+    explosions.forEach(e => e.t += dt);
+    explosions = explosions.filter(e => e.t < 0.35);
+  }
+
+  // 無敵光芒是否顯示：最後 1 秒會閃爍提醒
+  function starShowing() {
+    return starTimer > 0 && (starTimer > 1 || Math.floor(starTimer * 8) % 2 === 0);
+  }
+
+  // ===== 繪製 =====
+  function drawShip(x, y, w, h, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x + w / 2, y);
+    ctx.lineTo(x + w, y + h);
+    ctx.lineTo(x + w / 2, y + h - h * 0.27);
+    ctx.lineTo(x, y + h);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawPlayer() {
+    // 受傷無敵期間閃爍
+    if (invincible > 0 && Math.floor(invincible * 10) % 2 === 0) return;
+    const { x, y, w, h } = player;
+    drawShip(x, y, w, h, powerTimer > 0 ? '#ffd34d' : '#5ee0ff');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(x + w / 2 - 3, y + 10, 6, 8);
+
+    // 無敵星星：彩虹色流轉的光芒護盾（最後 1 秒閃爍提醒）
+    if (starShowing()) {
+      const cx = x + w / 2, cy = y + h / 2;
+      const r = 34 + Math.sin(clock * 10) * 2;
+      const hue = (clock * 360) % 360;
+      ctx.save();
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = 'hsl(' + hue + ',100%,60%)';
+      ctx.fillStyle = 'hsla(' + hue + ',100%,60%,0.12)';
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = 4;
+      const seg = 12; // 圓環分成多段，每段不同色相，並隨時間旋轉
+      for (let i = 0; i < seg; i++) {
+        ctx.strokeStyle = 'hsl(' + ((hue + i * 360 / seg) % 360) + ',100%,60%)';
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, i * Math.PI * 2 / seg, (i + 1.05) * Math.PI * 2 / seg);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  // 外星人造型以 40x28 為基準，依體型縮放；受擊瞬間變白
+  function drawAlien(a) {
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.scale(a.w / 40, a.h / 28);
+    ctx.fillStyle = a.flash > 0 ? '#ffffff' : a.type.color;
+    ctx.fillRect(6, 4, 28, 16);
+    ctx.fillRect(0, 10, 40, 8);
+    ctx.fillRect(4, 20, 6, 8);
+    ctx.fillRect(30, 20, 6, 8);
+    ctx.fillRect(10, 0, 4, 6);
+    ctx.fillRect(26, 0, 4, 6);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(12, 10, 5, 5);
+    ctx.fillRect(23, 10, 5, 5);
+    ctx.restore();
+
+    // 多血量的外星人顯示血條
+    if (a.type.hp > 1) {
+      ctx.fillStyle = '#400';
+      ctx.fillRect(a.x, a.y - 8, a.w, 4);
+      ctx.fillStyle = '#ff4d4d';
+      ctx.fillRect(a.x, a.y - 8, a.w * a.hp / a.type.hp, 4);
+    }
+  }
+
+  // 增益泡泡：半透明圓球 + 圖示，輕微左右飄動
+  function drawBubble(b) {
+    const def = BUBBLE_TYPES[b.kind];
+    const cx = b.x + b.w / 2 + Math.sin((clock - b.born) * 3) * 6;
+    const cy = b.y + b.h / 2;
+    ctx.fillStyle = def.color + '33';
+    ctx.strokeStyle = def.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 16, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = def.color;
+    ctx.font = 'bold 15px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(def.label, cx, cy + 1);
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  // 小兵：外型與玩家飛船相同但較小，藍色
+  function drawMinions() {
+    for (const m of minions) {
+      drawShip(m.x, m.y, m.w, m.h, '#8aa8ff');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(m.x + m.w / 2 - 2, m.y + 7, 4, 6);
+    }
+  }
+
+  // 命中能量條：顯示在大招能量條上方；追蹤模式時以粉紅色閃動
+  function drawHitBar() {
+    const bw = 56, bh = 5;
+    const bx = player.x + player.w / 2 - bw / 2, by = player.y - 32;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(bx - 1, by - 1, bw + 2, bh + 2);
+    ctx.fillStyle = homing ? (Math.floor(clock * 8) % 2 ? '#ff7bd5' : '#ffd0f0') : '#ff8a4d';
+    ctx.fillRect(bx, by, bw * hitGauge / HIT_MAX, bh);
+    ctx.strokeStyle = homing ? '#fff' : '#7a5a4a';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx - 0.5, by - 0.5, bw + 1, bh + 1);
+  }
+
+  // 反彈盾：飛船外的綠色護罩，剩餘次數越少越透明
+  function drawReflectShield() {
+    if (shieldHits <= 0) return;
+    const cx = player.x + player.w / 2, cy = player.y + player.h / 2;
+    ctx.save();
+    ctx.globalAlpha = 0.4 + 0.6 * shieldHits / SHIELD_HITS;
+    ctx.strokeStyle = '#4dffb0';
+    ctx.fillStyle = 'rgba(77,255,176,0.12)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 28, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // 能量條：顯示在飛船上方；大招期間以彩虹色顯示剩餘時間
+  function drawEnergyBar() {
+    const bw = 56, bh = 7;
+    const bx = player.x + player.w / 2 - bw / 2, by = player.y - 20;
+    const ratio = ultTimer > 0 ? ultTimer / ULT_DURATION : energy / ENERGY_MAX;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(bx - 1, by - 1, bw + 2, bh + 2);
+    ctx.fillStyle = ultTimer > 0 ? 'hsl(' + ((clock * 360) % 360) + ',100%,60%)' : '#b56bff';
+    ctx.fillRect(bx, by, bw * ratio, bh);
+    ctx.strokeStyle = ultTimer > 0 ? '#fff' : '#6b5a8a';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx - 0.5, by - 0.5, bw + 1, bh + 1);
+  }
+
+  // HUD：生命（左）、分數（中）、增益倒數（右）
+  function drawHUD() {
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 22px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Score: ' + score, W / 2, 32);
+
+    for (let i = 0; i < lives; i++) drawShip(16 + i * 30, 12, 22, 18, '#ff7b9c');
+
+    let row = 30;
+    const timerRow = (label, t, max, color, text) => {
+      ctx.textAlign = 'right';
+      ctx.fillStyle = color;
+      ctx.font = 'bold 18px sans-serif';
+      ctx.fillText(label + ' ' + (text !== undefined ? text : t.toFixed(1) + 's'), W - 16, row);
+      ctx.fillRect(W - 136, row + 8, 120 * (t / max), 4);
+      row += 36;
+    };
+    if (powerTimer > 0) timerRow('三連發', powerTimer, POWER_DURATION, '#ffd34d');
+    if (starTimer > 0)  timerRow('無敵', starTimer, STAR_DURATION, '#8ff0ff');
+    if (ultTimer > 0)   timerRow('大招', ultTimer, ULT_DURATION, '#ff6bd6');
+    if (mgTimer > 0)    timerRow('機關槍', mgTimer, MG_DURATION, '#ff9f43');
+    if (vampTimer > 0)  timerRow('吸血鬼', vampTimer, VAMP_DURATION, '#e8334f');
+    if (shieldHits > 0) timerRow('反彈盾', shieldHits, SHIELD_HITS, '#4dffb0', shieldHits + '/' + SHIELD_HITS);
+  }
+
+  function draw() {
+    ctx.fillStyle = '#02030a';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#cfd8ff';
+    for (const s of stars) ctx.fillRect(s.x, s.y, s.r, s.r);
+
+    bubbles.forEach(drawBubble);
+    aliens.forEach(drawAlien);
+    drawPlayer();
+    drawReflectShield();
+    drawMinions();
+    bullets.forEach(b => {
+      ctx.fillStyle = b.color || (b.hue === undefined ? '#ffe14d' : 'hsl(' + b.hue + ',100%,65%)');
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+    });
+    ctx.fillStyle = '#ff5a5a';
+    enemyBullets.forEach(b => ctx.fillRect(b.x, b.y, b.w, b.h));
+
+    // 彩色光點
+    for (const s of sparks) {
+      ctx.globalAlpha = Math.max(0, s.life * 2);
+      ctx.fillStyle = 'hsl(' + s.hue + ',100%,65%)';
+      ctx.fillRect(s.x - 2, s.y - 2, 4, 4);
+    }
+    ctx.globalAlpha = 1;
+
+    // 爆炸特效
+    for (const e of explosions) {
+      const k = e.t / 0.35;
+      ctx.globalAlpha = 1 - k;
+      ctx.fillStyle = 'rgba(255,140,40,0.35)';
+      ctx.beginPath(); ctx.arc(e.x, e.y, 6 + k * 30, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#ffd34d';
+      ctx.lineWidth = 1 + 4 * (1 - k);
+      ctx.beginPath(); ctx.arc(e.x, e.y, 8 + k * 42, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // 提示文字
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 16px sans-serif';
+    for (const p of popups) {
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = p.color;
+      ctx.fillText(p.text, p.x, p.y);
+    }
+    ctx.globalAlpha = 1;
+
+    drawEnergyBar();
+    drawHitBar();
+    drawHUD();
+
+    // 結束畫面
+    if (gameOver) {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+      ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ff4d4d';
+      ctx.font = 'bold 72px sans-serif';
+      ctx.fillText('GAME OVER', W / 2, H / 2 - 10);
+      ctx.fillStyle = '#fff';
+      ctx.font = '28px sans-serif';
+      ctx.fillText('Final Score: ' + score, W / 2, H / 2 + 40);
+      ctx.font = '20px sans-serif';
+      ctx.fillStyle = '#aab';
+      ctx.fillText('按下 Enter 鍵重新開始', W / 2, H / 2 + 85);
+    }
+  }
+
+  // ===== 遊戲主迴圈 =====
+  function loop(t) {
+    const dt = Math.min((t - lastTime) / 1000, 0.05); // 避免切換分頁後物件瞬移
+    lastTime = t;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  reset();
+  lastTime = performance.now();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
